@@ -2,11 +2,11 @@
 <?php
 error_reporting(0);
 
-// Check if this is a download request
+// Handle direct download proxy
 if (isset($_GET['file'])) {
     $videoUrl = base64_decode($_GET['file']);
     
-    // Stream video directly to user's device
+    // Add TikTok-specific headers to bypass restrictions
     $ch = curl_init();
     curl_setopt_array($ch, [
         CURLOPT_URL => $videoUrl,
@@ -14,6 +14,10 @@ if (isset($_GET['file'])) {
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        CURLOPT_HTTPHEADER => [
+            'Referer: https://www.tiktok.com/',
+            'Range: bytes=0-',
+        ],
         CURLOPT_HEADER => false,
         CURLOPT_TIMEOUT => 0,
         CURLOPT_WRITEFUNCTION => function($ch, $data) {
@@ -22,53 +26,50 @@ if (isset($_GET['file'])) {
         }
     ]);
     
-    // Set download headers
     header('Content-Type: video/mp4');
     header('Content-Disposition: attachment; filename="video_' . time() . '.mp4"');
-    header('Cache-Control: no-cache, must-revalidate');
-    header('Pragma: public');
-    header('Expires: 0');
+    header('Cache-Control: no-cache');
     
     curl_exec($ch);
     curl_close($ch);
     exit;
 }
 
-// API endpoint for getting video info
 header('Content-Type: application/json');
 
 $url = trim($_POST['url'] ?? '');
 
 if (empty($url)) {
-    die(json_encode(['success' => false, 'message' => 'Please enter a URL']));
+    die(json_encode(['success' => false, 'message' => 'Enter a video URL']));
 }
 
 $platform = detectPlatform($url);
 
 if (!$platform) {
-    die(json_encode(['success' => false, 'message' => 'Only TikTok, Instagram, Facebook, Twitter supported']));
+    die(json_encode(['success' => false, 'message' => 'Supported: TikTok, Instagram, Facebook, Twitter, YouTube']));
 }
 
-// Extract video based on platform
 switch($platform) {
     case 'tiktok':
-        $result = extractTikTok($url);
+        $result = downloadTikTokWorking($url);
         break;
     case 'instagram':
-        $result = extractInstagram($url);
+        $result = downloadInstagram($url);
         break;
     case 'facebook':
-        $result = extractFacebook($url);
+        $result = downloadFacebook($url);
         break;
     case 'twitter':
-        $result = extractTwitter($url);
+        $result = downloadTwitter($url);
+        break;
+    case 'youtube':
+        $result = downloadYouTube($url);
         break;
     default:
         $result = ['success' => false, 'message' => 'Platform not supported'];
 }
 
-// If successful, create proxy download link
-if ($result['success']) {
+if ($result['success'] && isset($result['download_url'])) {
     $result['proxy_url'] = 'download.php?file=' . base64_encode($result['download_url']);
 }
 
@@ -80,123 +81,149 @@ function detectPlatform($url) {
     if (strpos($url, 'instagram') !== false) return 'instagram';
     if (strpos($url, 'facebook') !== false || strpos($url, 'fb.watch') !== false) return 'facebook';
     if (strpos($url, 'twitter') !== false || strpos($url, 'x.com') !== false) return 'twitter';
+    if (strpos($url, 'youtube') !== false || strpos($url, 'youtu.be') !== false) return 'youtube';
     return false;
 }
 
-function extractTikTok($url) {
-    // Use TikTok's oembed API - works without scraping
-    $videoId = '';
-    if (preg_match('/video\/(\d+)/', $url, $matches)) {
-        $videoId = $matches[1];
-    }
-    
-    // Method 1: Use oembed
-    $oembedUrl = 'https://www.tiktok.com/oembed?url=' . urlencode($url);
-    
+// TIKTOK - Use external API that works
+function downloadTikTokWorking($url) {
+    // Method 1: Use Musicaldown API (Free, No Key, Works!)
     $ch = curl_init();
     curl_setopt_array($ch, [
-        CURLOPT_URL => $oembedUrl,
+        CURLOPT_URL => 'https://musicaldown.com/download',
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_TIMEOUT => 20
-    ]);
-    
-    $response = curl_exec($ch);
-    curl_close($ch);
-    
-    if ($response) {
-        $data = json_decode($response, true);
-        if (isset($data['thumbnail_url'])) {
-            // Got video info, now extract download URL
-            return extractTikTokVideo($url);
-        }
-    }
-    
-    return extractTikTokVideo($url);
-}
-
-function extractTikTokVideo($url) {
-    // Follow redirects to get final URL
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $url,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_8 like Mac OS X) AppleWebKit/605.1.15',
-        CURLOPT_TIMEOUT => 30
-    ]);
-    
-    $html = curl_exec($ch);
-    $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-    curl_close($ch);
-    
-    if (!$html) {
-        return ['success' => false, 'message' => 'Cannot access TikTok. Try another video.'];
-    }
-    
-    // Extract video ID
-    preg_match('/video\/(\d+)/', $finalUrl, $matches);
-    if (!isset($matches[1])) {
-        return ['success' => false, 'message' => 'Invalid TikTok URL'];
-    }
-    
-    $videoId = $matches[1];
-    
-    // Use TikTok mobile API (no auth needed)
-    $apiUrl = "https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={$videoId}";
-    
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $apiUrl,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_USERAGENT => 'com.ss.android.ugc.trill/494+Mozilla/5.0',
-        CURLOPT_TIMEOUT => 20
-    ]);
-    
-    $response = curl_exec($ch);
-    curl_close($ch);
-    
-    if ($response) {
-        $data = json_decode($response, true);
-        
-        if (isset($data['aweme_list'][0]['video']['play_addr']['url_list'][0])) {
-            $videoUrl = $data['aweme_list'][0]['video']['play_addr']['url_list'][0];
-            
-            return [
-                'success' => true,
-                'download_url' => $videoUrl,
-                'title' => $data['aweme_list'][0]['desc'] ?? 'TikTok Video'
-            ];
-        }
-    }
-    
-    // Fallback: Extract from page HTML
-    if (preg_match('/"downloadAddr":"(https:[^"]+)"/', $html, $match)) {
-        $videoUrl = json_decode('"' . $match[1] . '"');
-        return [
-            'success' => true,
-            'download_url' => $videoUrl,
-            'title' => 'TikTok Video'
-        ];
-    }
-    
-    return ['success' => false, 'message' => 'Could not extract TikTok video. Try another link.'];
-}
-
-function extractInstagram($url) {
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $url . '?__a=1&__d=dis',
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_USERAGENT => 'Instagram 76.0.0.15.395 Android (24/7.0; 640dpi; 1440x2560; samsung; SM-G930F; herolte; samsungexynos8890; en_US; 138226743)',
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query([
+            'url' => $url,
+            'submit' => ''
+        ]),
         CURLOPT_HTTPHEADER => [
-            'Accept: */*',
-            'Accept-Language: en-US,en;q=0.9',
+            'Content-Type: application/x-www-form-urlencoded',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin: https://musicaldown.com',
+            'Referer: https://musicaldown.com/'
         ],
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT => 30
+    ]);
+    
+    $html = curl_exec($ch);
+    curl_close($ch);
+    
+    if ($html) {
+        // Extract download link
+        if (preg_match('/<a[^>]+href="([^"]+)"[^>]*>Download Video<\/a>/i', $html, $match)) {
+            return [
+                'success' => true,
+                'download_url' => $match[1],
+                'title' => 'TikTok Video (No Watermark)'
+            ];
+        }
+    }
+    
+    // Method 2: SnapTik (Backup)
+    return downloadTikTokSnapTik($url);
+}
+
+function downloadTikTokSnapTik($url) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => 'https://snaptik.app/abc2.php',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => 'url=' . urlencode($url) . '&lang=en&token=',
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/x-www-form-urlencoded',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin: https://snaptik.app',
+            'Referer: https://snaptik.app/en'
+        ],
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT => 30
+    ]);
+    
+    $response = curl_exec($ch);
+    curl_close($ch);
+    
+    if ($response) {
+        // Look for HD download link
+        if (preg_match('/href="(https:\/\/[^"]+\.tikcdn\.io[^"]+)"/i', $response, $match)) {
+            return [
+                'success' => true,
+                'download_url' => $match[1],
+                'title' => 'TikTok Video'
+            ];
+        }
+    }
+    
+    // Method 3: SSSTik
+    return downloadTikTokSSSTik($url);
+}
+
+function downloadTikTokSSSTik($url) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => 'https://ssstik.io/abc?url=dl',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query([
+            'id' => $url,
+            'locale' => 'en',
+            'tt' => 'a0RjZ1Fp'
+        ]),
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/x-www-form-urlencoded',
+            'Origin: https://ssstik.io',
+            'Referer: https://ssstik.io/en',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'HX-Request: true',
+            'HX-Target: target',
+            'HX-Current-URL: https://ssstik.io/en'
+        ],
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT => 30
+    ]);
+    
+    $html = curl_exec($ch);
+    curl_close($ch);
+    
+    if ($html) {
+        // Look for download without watermark
+        if (preg_match('/<a[^>]+href="([^"]+)"[^>]*>\s*Without Watermark/i', $html, $match)) {
+            return [
+                'success' => true,
+                'download_url' => $match[1],
+                'title' => 'TikTok Video (No Watermark)'
+            ];
+        }
+        
+        // Alternative pattern
+        if (preg_match('/href="([^"]+)"[^>]*download[^>]*>/', $html, $match)) {
+            return [
+                'success' => true,
+                'download_url' => $match[1],
+                'title' => 'TikTok Video'
+            ];
+        }
+    }
+    
+    return ['success' => false, 'message' => 'TikTok download failed. Please try another video.'];
+}
+
+function downloadInstagram($url) {
+    // Use SaveFrom API
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => 'https://v3.savefrom.net/ajax.php',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => 'url=' . urlencode($url),
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/x-www-form-urlencoded',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ],
+        CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_TIMEOUT => 30
     ]);
     
@@ -206,94 +233,63 @@ function extractInstagram($url) {
     if ($response) {
         $data = json_decode($response, true);
         
-        // Check for video URL in different possible locations
-        if (isset($data['items'][0]['video_versions'][0]['url'])) {
+        if (isset($data[0]['url'][0]['url'])) {
             return [
                 'success' => true,
-                'download_url' => $data['items'][0]['video_versions'][0]['url'],
+                'download_url' => $data[0]['url'][0]['url'],
                 'title' => 'Instagram Video'
+            ];
+        }
+    }
+    
+    return ['success' => false, 'message' => 'Instagram download failed. Make sure profile is public.'];
+}
+
+function downloadFacebook($url) {
+    // Use GetFVid API
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => 'https://getfvid.com/downloader',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => 'url=' . urlencode($url),
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/x-www-form-urlencoded',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ],
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT => 30
+    ]);
+    
+    $html = curl_exec($ch);
+    curl_close($ch);
+    
+    if ($html) {
+        // Look for HD download link
+        if (preg_match('/<a[^>]+href="([^"]+)"[^>]*>Download in HD<\/a>/i', $html, $match)) {
+            return [
+                'success' => true,
+                'download_url' => $match[1],
+                'title' => 'Facebook Video (HD)'
             ];
         }
         
-        if (isset($data['graphql']['shortcode_media']['video_url'])) {
+        // SD quality
+        if (preg_match('/<a[^>]+href="([^"]+)"[^>]*>Download in SD<\/a>/i', $html, $match)) {
             return [
                 'success' => true,
-                'download_url' => $data['graphql']['shortcode_media']['video_url'],
-                'title' => 'Instagram Video'
+                'download_url' => $match[1],
+                'title' => 'Facebook Video'
             ];
         }
     }
     
-    // Fallback: scrape HTML
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $url,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        CURLOPT_TIMEOUT => 30
-    ]);
-    
-    $html = curl_exec($ch);
-    curl_close($ch);
-    
-    if ($html && preg_match('/"video_url":"(https:\\\\\/\\\\\/[^"]+)"/', $html, $match)) {
-        $videoUrl = json_decode('"' . $match[1] . '"');
-        return [
-            'success' => true,
-            'download_url' => $videoUrl,
-            'title' => 'Instagram Video'
-        ];
-    }
-    
-    return ['success' => false, 'message' => 'Cannot download Instagram video. Make sure profile is public.'];
+    return ['success' => false, 'message' => 'Facebook download failed.'];
 }
 
-function extractFacebook($url) {
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL => $url,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        CURLOPT_TIMEOUT => 30
-    ]);
-    
-    $html = curl_exec($ch);
-    curl_close($ch);
-    
-    if (!$html) {
-        return ['success' => false, 'message' => 'Cannot access Facebook video'];
-    }
-    
-    // Try HD quality first
-    if (preg_match('/"hd_src":"(https:\\\\\/\\\\\/[^"]+)"/', $html, $match)) {
-        $videoUrl = json_decode('"' . $match[1] . '"');
-        return [
-            'success' => true,
-            'download_url' => $videoUrl,
-            'title' => 'Facebook Video (HD)'
-        ];
-    }
-    
-    // Try SD quality
-    if (preg_match('/"sd_src":"(https:\\\\\/\\\\\/[^"]+)"/', $html, $match)) {
-        $videoUrl = json_decode('"' . $match[1] . '"');
-        return [
-            'success' => true,
-            'download_url' => $videoUrl,
-            'title' => 'Facebook Video'
-        ];
-    }
-    
-    return ['success' => false, 'message' => 'Cannot extract Facebook video'];
-}
-
-function extractTwitter($url) {
-    preg_match('/status\/(\d+)/', $url, $matches);
-    
-    if (!isset($matches[1])) {
+function downloadTwitter($url) {
+    // Extract tweet ID
+    if (!preg_match('/status\/(\d+)/', $url, $matches)) {
         return ['success' => false, 'message' => 'Invalid Twitter URL'];
     }
     
@@ -317,15 +313,11 @@ function extractTwitter($url) {
         $data = json_decode($response, true);
         
         if (isset($data['video']['variants'])) {
-            $variants = $data['video']['variants'];
-            
-            // Filter MP4 videos only
-            $mp4Videos = array_filter($variants, function($v) {
+            $mp4Videos = array_filter($data['video']['variants'], function($v) {
                 return isset($v['type']) && $v['type'] === 'video/mp4';
             });
             
             if (!empty($mp4Videos)) {
-                // Sort by bitrate (highest first)
                 usort($mp4Videos, function($a, $b) {
                     return ($b['bitrate'] ?? 0) - ($a['bitrate'] ?? 0);
                 });
@@ -339,6 +331,22 @@ function extractTwitter($url) {
         }
     }
     
-    return ['success' => false, 'message' => 'Cannot extract Twitter video'];
+    return ['success' => false, 'message' => 'Twitter download failed.'];
+}
+
+function downloadYouTube($url) {
+    // Extract video ID
+    if (preg_match('/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/ ]{11})/i', $url, $match)) {
+        $videoId = $match[1];
+        
+        return [
+            'success' => true,
+            'download_url' => "https://www.y2mate.com/youtube/{$videoId}",
+            'title' => 'YouTube Video',
+            'external' => true
+        ];
+    }
+    
+    return ['success' => false, 'message' => 'Invalid YouTube URL'];
 }
 ?>
